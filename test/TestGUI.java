@@ -1,4 +1,4 @@
-package com.solitaire;
+import com.solitaire.GUI;
 
 import javax.swing.SwingUtilities;
 
