@@ -2,7 +2,6 @@ package com.solitaire;
 
 /**
  * Core game logic for Peg Solitaire — separated from the UI layer.
- * Refactored for Sprint 3 to support the Game class hierarchy.
  *
  * <p>User Story 1: As a player, I want to select the board size (5, 7, or 9)
  * before starting a game so that I can customize the scale and duration of
@@ -34,7 +33,7 @@ public class Board {
         initialiseBoard();
     }
 
-    // ── Public ───────────────────────────────────────────────────────────────
+    // ── Public API ───────────────────────────────────────────────────────────────
 
     public int getSize()        { return size; }
     public BoardType getType()  { return type; }
@@ -43,17 +42,29 @@ public class Board {
     public HoleState getHole(int row, int col) { return grid[row][col]; }
 
     /**
+     * Sets the state of a hole directly. Only affects non-INVALID holes.
+     *
+     * Used by:
+     *   - Game.randomizeHoles() to redistribute pegs
+     *   - GameReplayer.restoreBoardSnapshot() to replay randomize actions exactly
+     */
+    public void setHole(int row, int col, HoleState state) {
+        if (row >= 0 && row < size && col >= 0 && col < size
+                && grid[row][col] != HoleState.INVALID) {
+            grid[row][col] = state;
+        }
+    }
+
+    /**
      * Shuffles pegs among valid holes while preserving the current peg count.
      * Retries until at least one valid move exists so the game stays playable.
      *
      * <p>Following Deepseek's "Tell, Don't Ask" recommendation: Board controls
-     * its own internal state — no external class needs to call setHole() to
-     * redistribute pegs. Game.randomize() delegates here entirely.
+     * its own internal state — Game.randomize() delegates here entirely.
      *
      * <p>User Story 8: AC 8.1 — peg count unchanged. AC 8.2 — valid move remains.
      */
     public void randomizeHoles() {
-        // Collect all valid positions and snapshot current peg count
         java.util.List<int[]> validHoles = new java.util.ArrayList<>();
         int pegCount = 0;
         for (int r = 0; r < size; r++) {
@@ -65,7 +76,6 @@ public class Board {
             }
         }
 
-        // Shuffle and redistribute — retry until at least one valid move exists
         java.util.Random rng = new java.util.Random();
         int attempts = 0;
         do {
@@ -84,8 +94,8 @@ public class Board {
     }
 
     /**
-     * Resets the gameOver flag after randomization so play can continue.
-     * Only Game.randomize() should call this.
+     * Resets the gameOver flag after randomization or snapshot restore
+     * so that play can continue.
      */
     public void resetGameOver() { gameOver = false; }
 
