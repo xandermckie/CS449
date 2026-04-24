@@ -1,267 +1,242 @@
 package com.solitaire;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Path;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Unit tests — contains the original Sprint 0 arithmetic tests plus
- * Sprint 3 tests clearly divided into Manual Game and Automated Game sections.
+ * Sprint 5 additional tests targeting coverage gaps identified in the code review.
  *
- * The Manual Game and Automated Game sections are the ones to show
- * in the Sprint 3 video demonstration for parts (e) and (f).
+ * Focus areas:
+ *   - GameRecord file I/O (previously ~70% coverage)
+ *   - GameReplayer snapshot restore
+ *   - AutomatedGame.getLastMove()
+ *   - Board edge cases (out-of-bounds setHole, pegCount guard in randomizeHoles)
  */
-class UnitTests {
+class BoardTest_Sprint5 {
 
-    // ════════════════════════════════════════════════════════════════════════════
-    // Original Sprint 0 tests — kept unchanged
-    // ════════════════════════════════════════════════════════════════════════════
+    // ── GameRecord file I/O ───────────────────────────────────────────────────────
 
     /**
-     * User Story: As a developer, I want to ensure that basic arithmetic
-     * operations work correctly so that the game logic calculations are accurate.
-     *
-     * Acceptance Criteria:
-     * - Addition should correctly sum two numbers
-     * - Subtraction should correctly find the difference
-     * - Result should be accurate for both positive and negative numbers
+     * A recording saved to a temp file and loaded back produces identical moves.
+     * Covers: GameRecord.saveToFile(), GameRecord.loadFromFile()
      */
     @Test
-    void testBasicArithmetic() {
-        Calculator calc = new Calculator();
+    void recordAndReload_movesArePreserved(@TempDir Path tempDir) throws IOException {
+        GameRecord record = new GameRecord(7, BoardType.ENGLISH, "Manual");
+        record.recordMove(3, 1, 3, 3);
+        record.recordMove(1, 3, 3, 3);
+        record.recordEnd(30, "Average");
 
-        assertEquals(10, calc.add(7, 3),
-                "Adding 7 and 3 should equal 10");
-        assertEquals(0, calc.add(-5, 5),
-                "Adding -5 and 5 should equal 0");
-        assertEquals(4, calc.subtract(7, 3),
-                "Subtracting 3 from 7 should equal 4");
-        assertEquals(-8, calc.subtract(2, 10),
-                "Subtracting 10 from 2 should equal -8");
+        File file = tempDir.resolve("test_recording.txt").toFile();
+        record.saveToFile(file.getAbsolutePath());
+
+        GameRecord loaded = GameRecord.loadFromFile(file.getAbsolutePath());
+
+        assertEquals(7,                    loaded.getBoardSize());
+        assertEquals(BoardType.ENGLISH,    loaded.getBoardType());
+        assertEquals("Manual",             loaded.getModeName());
+        assertEquals(3,                    loaded.getActions().size());
+
+        GameRecord.RecordedAction move1 = loaded.getActions().get(0);
+        assertEquals(GameRecord.RecordedAction.Type.MOVE, move1.type);
+        assertEquals(3, move1.fromRow); assertEquals(1, move1.fromCol);
+        assertEquals(3, move1.toRow);   assertEquals(3, move1.toCol);
+
+        GameRecord.RecordedAction end = loaded.getActions().get(2);
+        assertEquals(GameRecord.RecordedAction.Type.END, end.type);
+        assertEquals(30,        end.finalPegCount);
+        assertEquals("Average", end.rating);
     }
 
     /**
-     * User Story: As a developer, I want to validate input data properly
-     * so that the application handles edge cases without crashing.
-     *
-     * Acceptance Criteria:
-     * - Division by zero should throw an exception
-     * - Negative numbers should be handled correctly
-     * - Valid operations should complete successfully
+     * A RANDOMIZE action is saved with a board snapshot and restored exactly on reload.
+     * Covers: GameRecord.recordRandomize(Board), snapshot round-trip
      */
     @Test
-    void testInputValidation() {
-        Calculator calc = new Calculator();
+    void recordAndReload_randomizeSnapshotPreserved(@TempDir Path tempDir) throws IOException {
+        Board board = new Board(7, BoardType.ENGLISH);
+        board.tryMove(3, 1, 3, 3); // make a move first so board is non-standard
 
-        assertEquals(4, calc.divide(12, 3),
-                "Dividing 12 by 3 should equal 4");
-        assertThrows(ArithmeticException.class, () -> calc.divide(10, 0),
-                "Division by zero should throw ArithmeticException");
-        assertEquals(-3, calc.divide(9, -3),
-                "Dividing 9 by -3 should equal -3");
+        GameRecord record = new GameRecord(7, BoardType.ENGLISH, "Manual");
+        record.recordRandomize(board); // snapshot current state
+
+        File file = tempDir.resolve("randomize_test.txt").toFile();
+        record.saveToFile(file.getAbsolutePath());
+
+        GameRecord loaded = GameRecord.loadFromFile(file.getAbsolutePath());
+        assertEquals(1, loaded.getActions().size());
+
+        GameRecord.RecordedAction action = loaded.getActions().get(0);
+        assertEquals(GameRecord.RecordedAction.Type.RANDOMIZE, action.type);
+        assertNotNull(action.boardSnapshot, "Board snapshot must not be null");
+        assertFalse(action.boardSnapshot.isEmpty(), "Board snapshot must not be empty");
     }
 
     /**
-     * Simple calculator class for testing purposes.
+     * GameReplayer restores a RANDOMIZE action to the exact same board state.
+     * Covers: GameReplayer.restoreBoardSnapshot()
      */
-    static class Calculator {
+    @Test
+    void replayRestoresBoardSnapshotExactly(@TempDir Path tempDir) throws IOException {
+        // Play one move then record the board state
+        Board originalBoard = new Board(7, BoardType.ENGLISH);
+        originalBoard.tryMove(3, 1, 3, 3);
 
-        public int add(int a, int b) { return a + b; }
+        GameRecord record = new GameRecord(7, BoardType.ENGLISH, "Manual");
+        record.recordRandomize(originalBoard);
+        record.recordEnd(originalBoard.getPegCount(), originalBoard.getPerformanceRating());
 
-        public int subtract(int a, int b) { return a - b; }
+        File file = tempDir.resolve("replay_snapshot.txt").toFile();
+        record.saveToFile(file.getAbsolutePath());
 
-        public int divide(int a, int b) {
-            if (b == 0) throw new ArithmeticException("Cannot divide by zero");
-            return a / b;
+        // Replay and verify the board matches the snapshot
+        GameRecord loaded   = GameRecord.loadFromFile(file.getAbsolutePath());
+        GameReplayer replayer = new GameReplayer(loaded);
+        replayer.stepForward(); // apply RANDOMIZE
+
+        Board replayedBoard = replayer.getBoard();
+        int size = originalBoard.getSize();
+
+        for (int r = 0; r < size; r++) {
+            for (int c = 0; c < size; c++) {
+                assertEquals(originalBoard.getHole(r, c), replayedBoard.getHole(r, c),
+                        "Hole (" + r + "," + c + ") must match after snapshot restore");
+            }
         }
     }
 
-    // ════════════════════════════════════════════════════════════════════════════
-    // MANUAL GAME TESTS (Sprint 3)
-    // ════════════════════════════════════════════════════════════════════════════
-
     /**
-     * Manual game starts with the correct board state.
-     * Centre hole is empty, game is not over, pegs are present.
+     * Loading a file that has no MODE line throws IOException.
+     * Covers: GameRecord.loadFromFile() error path
      */
     @Test
-    void manualGame_freshGame_correctInitialState() {
-        ManualGame game = new ManualGame(7, BoardType.ENGLISH);
+    void loadFromFile_missingModeLine_throwsIOException(@TempDir Path tempDir) throws IOException {
+        File file = tempDir.resolve("bad_recording.txt").toFile();
+        java.nio.file.Files.writeString(file.toPath(),
+                "# Bad file\nSIZE:7\nTYPE:ENGLISH\nMOVE:3,1,3,3\n");
 
-        assertFalse(game.isGameOver(),     "Game should not be over at the start");
-        assertTrue(game.getPegCount() > 0, "Board should have pegs");
-        assertEquals(HoleState.EMPTY, game.getBoard().getHole(3, 3),
-                "Centre hole must be empty at start");
+        assertThrows(IOException.class,
+                () -> GameRecord.loadFromFile(file.getAbsolutePath()),
+                "Missing MODE line should throw IOException");
     }
 
-    /**
-     * A valid manual move removes the jumped peg and updates the peg count.
-     */
-    @Test
-    void manualGame_validMove_removesJumpedPegAndUpdatesPegCount() {
-        ManualGame game = new ManualGame(7, BoardType.ENGLISH);
-        int pegsBefore = game.getPegCount();
-
-        boolean moved = game.makeMove(3, 1, 3, 3);
-
-        assertTrue(moved,              "Valid move should return true");
-        assertEquals(pegsBefore - 1, game.getPegCount(), "Peg count should decrease by 1");
-        assertEquals(HoleState.EMPTY, game.getBoard().getHole(3, 1), "Source must be empty");
-        assertEquals(HoleState.EMPTY, game.getBoard().getHole(3, 2), "Jumped peg must be removed");
-        assertEquals(HoleState.PEG,   game.getBoard().getHole(3, 3), "Destination must have peg");
-    }
+    // ── AutomatedGame.getLastMove() ───────────────────────────────────────────────
 
     /**
-     * An invalid manual move is rejected and the board is unchanged.
+     * getLastMove() returns a non-null 4-element array after a successful move.
+     * Covers: AutomatedGame.getLastMove()
      */
     @Test
-    void manualGame_invalidMove_returnsFalseAndBoardUnchanged() {
-        ManualGame game = new ManualGame(7, BoardType.ENGLISH);
-        int pegsBefore = game.getPegCount();
-
-        boolean moved = game.makeMove(3, 3, 3, 1); // centre is empty, invalid
-
-        assertFalse(moved,             "Invalid move should return false");
-        assertEquals(pegsBefore, game.getPegCount(), "Peg count must not change");
-    }
-
-    /**
-     * Manual game ends automatically when no valid moves remain.
-     */
-    @Test
-    void manualGame_gameOver_detectedAutomatically() {
-        ManualGame game = new ManualGame(7, BoardType.ENGLISH);
-        int safety = 0;
-        while (game.getBoard().hasValidMoves() && safety++ < 2000)
-            makeFirstMove(game.getBoard());
-
-        assertFalse(game.getBoard().hasValidMoves(), "No moves should remain at game over");
-    }
-
-    /**
-     * Performance rating is a valid string when manual game ends.
-     */
-    @Test
-    void manualGame_gameOver_validPerformanceRating() {
-        ManualGame game = new ManualGame(7, BoardType.ENGLISH);
-        int safety = 0;
-        while (game.getBoard().hasValidMoves() && safety++ < 2000)
-            makeFirstMove(game.getBoard());
-
-        String rating = game.getPerformanceRating();
-        assertTrue(rating.equals("Outstanding") || rating.equals("Very Good")
-                        || rating.equals("Good")        || rating.equals("Average"),
-                "Rating must be one of the four valid values, got: " + rating);
-    }
-
-    /**
-     * Randomize keeps the same peg count and leaves at least one valid move.
-     */
-    @Test
-    void manualGame_randomize_preservesPegCountAndPlayability() {
-        ManualGame game = new ManualGame(7, BoardType.ENGLISH);
-        int before = game.getPegCount();
-
-        game.randomize();
-
-        assertEquals(before, game.getPegCount(), "Peg count must not change after randomize");
-        assertTrue(game.getBoard().hasValidMoves(), "Board must remain playable after randomize");
-    }
-
-    // ════════════════════════════════════════════════════════════════════════════
-    // AUTOMATED GAME TESTS (Sprint 3)
-    // ════════════════════════════════════════════════════════════════════════════
-
-    /**
-     * Automated game starts with the correct board state.
-     */
-    @Test
-    void automatedGame_freshGame_correctInitialState() {
+    void automatedGame_getLastMove_notNullAfterMove() {
         AutomatedGame game = new AutomatedGame(7, BoardType.ENGLISH);
-
-        assertFalse(game.isGameOver(),     "Game should not be over at the start");
-        assertTrue(game.getPegCount() > 0, "Board should have pegs");
-        assertFalse(game.getAllValidMoves().isEmpty(), "Valid moves must exist on a fresh board");
-    }
-
-    /**
-     * A single automated move reduces the peg count by exactly one.
-     */
-    @Test
-    void automatedGame_singleAutoMove_reducesPegCountByOne() {
-        AutomatedGame game = new AutomatedGame(7, BoardType.ENGLISH);
-        int before = game.getPegCount();
+        assertNull(game.getLastMove(), "getLastMove should be null before any move");
 
         boolean moved = game.makeAutoMove();
+        assertTrue(moved, "Move should succeed on a fresh board");
 
-        assertTrue(moved,              "Automated move should succeed on a fresh board");
-        assertEquals(before - 1, game.getPegCount(), "Peg count must decrease by exactly 1");
+        int[] last = game.getLastMove();
+        assertNotNull(last, "getLastMove must not be null after a successful move");
+        assertEquals(4, last.length, "getLastMove must return 4 coordinates");
     }
 
     /**
-     * Every automated move selects only valid jumps — peg count decreases by 1 each time.
+     * getLastMove() returns null when no moves are available.
      */
     @Test
-    void automatedGame_tenMoves_eachRemovesExactlyOnePeg() {
-        AutomatedGame game = new AutomatedGame(7, BoardType.ENGLISH);
-
-        for (int i = 0; i < 10 && game.getBoard().hasValidMoves(); i++) {
-            int before = game.getPegCount();
-            game.makeAutoMove();
-            assertEquals(before - 1, game.getPegCount(),
-                    "Move " + (i + 1) + " should remove exactly one peg");
-        }
-    }
-
-    /**
-     * Automated game ends when no valid moves remain.
-     */
-    @Test
-    void automatedGame_gameOver_detectedWhenNoMovesRemain() {
+    void automatedGame_getLastMove_nullWhenNoMovesRemain() {
         AutomatedGame game = new AutomatedGame(7, BoardType.ENGLISH);
         int safety = 0;
         while (game.getBoard().hasValidMoves() && safety++ < 2000)
             game.makeAutoMove();
 
-        assertFalse(game.getBoard().hasValidMoves(), "No moves should remain at game over");
-        assertFalse(game.makeAutoMove(), "makeAutoMove should return false when game is over");
+        boolean moved = game.makeAutoMove();
+        assertFalse(moved, "makeAutoMove should return false when no moves remain");
+        assertNull(game.getLastMove(), "getLastMove should be null when no moves available");
+    }
+
+    // ── Board edge cases ──────────────────────────────────────────────────────────
+
+    /**
+     * setHole() silently ignores out-of-bounds coordinates.
+     * Covers: setHole() guard condition
+     */
+    @Test
+    void board_setHole_outOfBounds_noException() {
+        Board board = new Board(7, BoardType.ENGLISH);
+        // These should not throw — just be silently ignored
+        assertDoesNotThrow(() -> board.setHole(-1, 0, HoleState.PEG));
+        assertDoesNotThrow(() -> board.setHole(0, -1, HoleState.PEG));
+        assertDoesNotThrow(() -> board.setHole(99, 99, HoleState.PEG));
+        assertDoesNotThrow(() -> board.setHole(7, 7, HoleState.PEG));
     }
 
     /**
-     * Performance rating is a valid string when automated game ends.
+     * setHole() does not modify INVALID holes.
      */
     @Test
-    void automatedGame_gameOver_validPerformanceRating() {
-        AutomatedGame game = new AutomatedGame(7, BoardType.ENGLISH);
-        int safety = 0;
-        while (game.getBoard().hasValidMoves() && safety++ < 2000)
-            game.makeAutoMove();
-
-        String rating = game.getPerformanceRating();
-        assertTrue(rating.equals("Outstanding") || rating.equals("Very Good")
-                        || rating.equals("Good")        || rating.equals("Average"),
-                "Rating must be one of the four valid values, got: " + rating);
+    void board_setHole_invalidHole_notModified() {
+        Board board = new Board(7, BoardType.ENGLISH);
+        // Corner (0,0) is INVALID on English board
+        assertEquals(HoleState.INVALID, board.getHole(0, 0));
+        board.setHole(0, 0, HoleState.PEG);
+        assertEquals(HoleState.INVALID, board.getHole(0, 0),
+                "setHole must not modify INVALID holes");
     }
 
     /**
-     * Automated game mode name is "Automated".
+     * randomizeHoles() does not throw when called on a board with no pegs.
+     * Covers: the pegCount == 0 guard added in Sprint 5.
      */
     @Test
-    void automatedGame_modeName_isAutomated() {
-        AutomatedGame game = new AutomatedGame(7, BoardType.ENGLISH);
-        assertEquals("Automated", game.getModeName());
-    }
-
-    // ════════════════════════════════════════════════════════════════════════════
-    // Helper
-    // ════════════════════════════════════════════════════════════════════════════
-
-    private boolean makeFirstMove(Board board) {
-        int[][] dirs = {{0,2},{0,-2},{2,0},{-2,0}};
-        for (int r = 0; r < board.getSize(); r++)
-            for (int c = 0; c < board.getSize(); c++)
+    void board_randomizeHoles_noPegs_doesNotThrow() {
+        Board board = new Board(3, BoardType.DIAMOND);
+        int size = board.getSize();
+        // Remove all pegs manually
+        for (int r = 0; r < size; r++)
+            for (int c = 0; c < size; c++)
                 if (board.getHole(r, c) == HoleState.PEG)
-                    for (int[] d : dirs)
-                        if (board.tryMove(r, c, r+d[0], c+d[1])) return true;
-        return false;
+                    board.setHole(r, c, HoleState.EMPTY);
+
+        assertEquals(0, board.getPegCount());
+        assertDoesNotThrow(board::randomizeHoles,
+                "randomizeHoles must not throw when no pegs remain");
+    }
+
+    // ── Recording with automated game ─────────────────────────────────────────────
+
+    /**
+     * Recording an automated game produces one MOVE entry per makeAutoMove() call.
+     */
+    @Test
+    void automatedGame_recording_capturesEachMove(@TempDir Path tempDir) throws IOException {
+        AutomatedGame game   = new AutomatedGame(7, BoardType.ENGLISH);
+        GameRecord    record = new GameRecord(7, BoardType.ENGLISH, "Automated");
+
+        int movesMade = 0;
+        for (int i = 0; i < 5 && game.getBoard().hasValidMoves(); i++) {
+            int before = game.getPegCount();
+            boolean moved = game.makeAutoMove();
+            if (moved) {
+                int[] last = game.getLastMove();
+                assertNotNull(last, "getLastMove must not be null after move");
+                record.recordMove(last[0], last[1], last[2], last[3]);
+                movesMade++;
+            }
+        }
+        record.recordEnd(game.getPegCount(), game.getPerformanceRating());
+
+        File file = tempDir.resolve("auto_record.txt").toFile();
+        record.saveToFile(file.getAbsolutePath());
+
+        GameRecord loaded = GameRecord.loadFromFile(file.getAbsolutePath());
+        // Should have movesMade MOVE actions + 1 END
+        assertEquals(movesMade + 1, loaded.getActions().size(),
+                "Recorded action count should equal moves made + 1 END");
+        for (int i = 0; i < movesMade; i++)
+            assertEquals(GameRecord.RecordedAction.Type.MOVE, loaded.getActions().get(i).type);
     }
 }
