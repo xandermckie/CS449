@@ -13,7 +13,8 @@ package com.solitaire;
  */
 public class Board {
 
-    private static final int[][] DIRECTIONS = { {-1,0}, {1,0}, {0,-1}, {0,1} };
+    private static final int[][] DIRECTIONS            = { {-1,0}, {1,0}, {0,-1}, {0,1} };
+    private static final int     MAX_RANDOMIZE_ATTEMPTS = 100;
 
     private final HoleState[][] grid;
     private final int size;
@@ -76,6 +77,9 @@ public class Board {
             }
         }
 
+        // Guard: nothing to shuffle if no pegs exist
+        if (pegCount == 0) return;
+
         java.util.Random rng = new java.util.Random();
         int attempts = 0;
         do {
@@ -90,7 +94,7 @@ public class Board {
                 grid[pos[0]][pos[1]] = (i < pegCount) ? HoleState.PEG : HoleState.EMPTY;
             }
             attempts++;
-        } while (!hasValidMoves() && attempts < 100);
+        } while (!hasValidMoves() && attempts < MAX_RANDOMIZE_ATTEMPTS);
     }
 
     /**
@@ -183,9 +187,10 @@ public class Board {
     private void initialiseHexagon() {
         int centre = size / 2;
         for (int r = 0; r < size; r++) {
-            int offset = Math.abs(r - centre);
-            int cs = offset / 2, ce = size - 1 - cs;
-            for (int c = cs; c <= ce; c++) grid[r][c] = HoleState.PEG;
+            int offset   = Math.abs(r - centre);
+            int colStart = offset / 2;
+            int colEnd   = size - 1 - colStart;
+            for (int c = colStart; c <= colEnd; c++) grid[r][c] = HoleState.PEG;
         }
     }
 
